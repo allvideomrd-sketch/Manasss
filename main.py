@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import smtplib
+import socket
 from email.mime.text import MIMEText
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -17,9 +18,9 @@ from telegram.ext import (
 # ============================================================
 #  CONFIGURATION & DATA PATHS
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8842693606:AAFpPY5MYieZD27K-PhpYKh86FjU3Gjl4lc")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8558626927:AAFV3wIH0flAirKep8N10Em8T0TBC6pNCpY")
 EMAIL_USER = os.getenv("EMAIL_USER", "alphacopyright11@gmail.com")
-EMAIL_PASS = os.getenv("EMAIL_PASS", "xqmw toma yodn mzrj")
+EMAIL_PASS = os.getenv("EMAIL_PASS", "xqmwtomayodnmzrj")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1908783570"))  # Replace with your Telegram ID
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -99,7 +100,6 @@ def is_premium(user_id: int) -> bool:
     return int(user_id) in premium_users or is_owner(user_id)
 
 def get_credits(user_id: int):
-    # Owners have unlimited credits
     if is_owner(user_id):
         return "∞ (Unlimited)"
     return user_credits.get(str(user_id), 0)
@@ -109,7 +109,6 @@ def add_credits(user_id: int, amount: int):
     user_credits[uid] = user_credits.get(uid, 0) + amount
 
 def use_credit(user_id: int) -> bool:
-    # Owners do not consume credits
     if is_owner(user_id):
         return True
     
@@ -120,10 +119,9 @@ def use_credit(user_id: int) -> bool:
     return False
 
 # ============================================================
-#  EMAIL LOGIC (ONLY DESCRIPTION IN BODY)
+#  EMAIL LOGIC (FIXED NON-BLOCKING WITH TIMEOUT)
 # ============================================================
 def generate_email_content(data: dict) -> str:
-    # Sirf Description bhejega — Extra header/metadata remove kar diya gaya hai
     return data.get('description', '')
 
 def _send_mail_sync(dest, subject, content):
@@ -132,7 +130,8 @@ def _send_mail_sync(dest, subject, content):
     msg["From"] = f"Scam Reporter <{EMAIL_USER}>"
     msg["To"] = dest
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+    # Added 10 seconds strict timeout to prevent Render thread hanging
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
         server.login(EMAIL_USER, EMAIL_PASS)
         server.sendmail(EMAIL_USER, [dest], msg.as_string())
 
@@ -146,6 +145,7 @@ async def send_email_reports(data: dict, loop: int = 1, delay: int = 0, target_e
     for i in range(loop):
         for dest in recipients:
             try:
+                # Execution pushed completely to background executor
                 await asyncio.to_thread(_send_mail_sync, dest, subject, content)
                 results.append({"dest": dest, "loop": i + 1, "status": "OK"})
             except Exception as err:
@@ -305,7 +305,7 @@ async def premium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     kb_list = [[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]
     if not is_prem:
-        kb_list.insert(0, [InlineKeyboardButton("📞 Contact Owner", url="https://t.me/GrenTzy")])
+        kb_list.insert(0, [InlineKeyboardButton("📞 Contact Owner", url="https://t.me/NullQor")])
 
     kb = InlineKeyboardMarkup(kb_list)
 
@@ -477,7 +477,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not session or session.get("step") != "confirm":
         return await query.message.reply_text("⚠️ Invalid session. Please start again with /report")
 
-    await query.message.reply_text("⏳ Processing email transmission...")
+    status_msg = await query.message.reply_text("⏳ Processing email transmission...")
 
     data = session["data"]
     loop = session["loop"]
@@ -497,7 +497,7 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"- {e['dest']}: {e['error'][:50]}...\n"
 
     msg += f"\nScam report for <b>{data.get('username')}</b> has been processed."
-    await query.message.reply_html(msg, reply_markup=get_after_report_keyboard())
+    await status_msg.edit_text(msg, parse_mode="HTML", reply_markup=get_after_report_keyboard())
     print(f"[LOG] {data.get('reporter')} -> {data.get('username')} ({success}/{total}) loop={loop} delay={delay}")
     user_session.pop(user_id, None)
 
@@ -508,7 +508,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text.strip()
 
-    # Process Admin Input States
     if user_id in user_state:
         state_data = user_state.pop(user_id)
         action = state_data["action"]
@@ -560,7 +559,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_all_data()
             return await update.message.reply_text(f"✅ Added {amount} credits to ID {target_id}. Current total: {get_credits(target_id)}")
 
-    # Process User Report Workflow Sessions
     session = user_session.get(user_id)
     if not session:
         return
