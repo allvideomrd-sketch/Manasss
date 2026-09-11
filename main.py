@@ -2,9 +2,11 @@ import os
 import json
 import asyncio
 import smtplib
-from email.mime.text import MIMEText
+import re
 from datetime import datetime
+from email.mime.text import MIMEText
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -19,7 +21,6 @@ from telegram.ext import (
 # ============================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8558626927:AAHy4zcIwZwfQvZspnBL5FklXHEbq7xdAp0")
 EMAIL_USER = os.getenv("EMAIL_USER", "alphacopyright11@gmail.com")
-# Passwords me spaces na rakhein (e.g., xqmwtomayodnmzrj)
 EMAIL_PASS = os.getenv("EMAIL_PASS", "xqmwtomayodnmzrj")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1908783570"))
 
@@ -28,12 +29,20 @@ EMAILS_FILE = os.path.join(DATA_DIR, "emails.json")
 PREMIUM_FILE = os.path.join(DATA_DIR, "premium.json")
 OWNERS_FILE = os.path.join(DATA_DIR, "owners.json")
 CREDITS_FILE = os.path.join(DATA_DIR, "credits.json")
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+
+# Premium Custom Emoji IDs
+EMOJI_FIRE = "5276032951342088188"
+EMOJI_CHECK = "6298612102709909362"
+EMOJI_MAIL = "5253742260054409879"
+EMOJI_WARN = "5224607267797606837"
 
 # Dynamic state variables
 emails = []
 owners = []
 premium_users = set()
 user_credits = {}
+users_db = {}
 
 # Session states tracking
 user_session = {}
@@ -60,7 +69,7 @@ def save_json(file_path, data):
         json.dump(data, f, indent=2)
 
 def load_all_data():
-    global emails, owners, premium_users, user_credits
+    global emails, owners, premium_users, user_credits, users_db
     default_emails = [
         "abuse@telegram.org", "support@telegram.org", "report@telegram.org",
         "security@telegram.org", "developers@telegram.org", "support@stel.com",
@@ -82,16 +91,25 @@ def load_all_data():
     premium_arr = load_json(PREMIUM_FILE, [])
     premium_users = set(premium_arr)
     user_credits = load_json(CREDITS_FILE, {})
+    users_db = load_json(USERS_FILE, {})
 
 def save_all_data():
     save_json(EMAILS_FILE, emails)
     save_json(OWNERS_FILE, owners)
     save_json(PREMIUM_FILE, list(premium_users))
     save_json(CREDITS_FILE, user_credits)
+    save_json(USERS_FILE, users_db)
 
 # ============================================================
-#  HELPER FUNCTIONS
+#  USER DATA & CREDITS HELPER
 # ============================================================
+def get_user_data(user_id: int):
+    uid = str(user_id)
+    if uid not in users_db:
+        users_db[uid] = {"reports_left": 2, "donated_emails": []}
+        save_json(USERS_FILE, users_db)
+    return users_db[uid]
+
 def is_owner(user_id: int) -> bool:
     return int(user_id) in owners
 
@@ -101,24 +119,26 @@ def is_premium(user_id: int) -> bool:
 def get_credits(user_id: int):
     if is_owner(user_id):
         return "∞ (Unlimited)"
-    return user_credits.get(str(user_id), 0)
+    u_data = get_user_data(user_id)
+    return u_data.get("reports_left", 0)
 
 def add_credits(user_id: int, amount: int):
-    uid = str(user_id)
-    user_credits[uid] = user_credits.get(uid, 0) + amount
+    u_data = get_user_data(user_id)
+    u_data["reports_left"] += amount
+    save_json(USERS_FILE, users_db)
 
 def use_credit(user_id: int) -> bool:
     if is_owner(user_id):
         return True
-    
-    uid = str(user_id)
-    if user_credits.get(uid, 0) > 0:
-        user_credits[uid] -= 1
+    u_data = get_user_data(user_id)
+    if u_data.get("reports_left", 0) > 0:
+        u_data["reports_left"] -= 1
+        save_json(USERS_FILE, users_db)
         return True
     return False
 
 # ============================================================
-#  EMAIL LOGIC (NON-BLOCKING WITH DYNAMIC SUBJECT)
+#  EMAIL LOGIC (NON-BLOCKING)
 # ============================================================
 def generate_email_content(data: dict) -> str:
     return data.get('description', '')
@@ -129,7 +149,6 @@ def _send_mail_sync(dest, subject, content):
     msg["From"] = f"Scam Reporter <{EMAIL_USER}>"
     msg["To"] = dest
 
-    # 10s strict timeout for Render stability
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
         server.login(EMAIL_USER, EMAIL_PASS)
         server.sendmail(EMAIL_USER, [dest], msg.as_string())
@@ -139,7 +158,6 @@ async def send_email_reports(data: dict, loop: int = 1, delay: int = 0, target_e
     recipients = target_emails if target_emails else emails
     results = []
 
-    # Use manual subject from user session, fallback to default if empty
     default_sub = f"[SCAM REPORT] {data.get('username', 'Unknown')}{' - CHANNEL' if data.get('type') == 'channel' else ''}"
     subject = data.get('subject', default_sub)
 
@@ -201,30 +219,24 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_session.pop(user_id, None)
     user_state.pop(user_id, None)
     load_all_data()
+    u_data = get_user_data(user_id)
 
     start_message = (
-        "<b>🚨 TELEGRAM SCAM REPORT BOT</b>\n\n"
-        "Send scam reports directly to multiple security support channels.\n\n"
-        "📌 <b>How to use:</b>\n"
-        "• Click the menu buttons below, or\n"
-        "• Use command: /report &lt;username&gt;\n\n"
-        "📋 <b>Available Commands:</b>\n"
-        "• /report &lt;username&gt; – Start a new report\n"
-        "• /menu – Show main menu\n"
-        "• /batal – Cancel current process\n"
-        "• /help – View help\n"
-        "• /status – Check bot status\n"
-        "• /premium – Check premium status\n"
-        "• /credit – Check your remaining credits\n"
-        "• /addemail &lt;email&gt; – Add email (Owner)\n"
-        "• /removeemail &lt;email&gt; – Remove email (Owner)\n"
-        "• /listemails – View email list (Owner)\n"
-        "• /addowner &lt;id&gt; – Add owner (Owner)\n"
-        "• /delowner &lt;id&gt; – Remove owner (Owner)\n"
-        "• /addprem &lt;id&gt; – Add premium user (Owner)\n"
-        "• /delprem &lt;id&gt; – Remove premium user (Owner)\n"
-        "• /addcredit &lt;id&gt; &lt;amount&gt; – Add credits (Owner)\n\n"
-        "Select an option below:"
+        f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🚨</tg-emoji> <b>TELEGRAM SCAM REPORT BOT</b>\n\n"
+        f"Aapke paas abhi <b>{u_data['reports_left']} Free Reports</b> baaki hain.\n\n"
+        f"📌 <b>How to use:</b>\n"
+        f"• Click the menu buttons below, or\n"
+        f"• Command: <code>/report &lt;username&gt;</code>\n"
+        f"• Donate Gmail for free reports: <code>/donatesender &lt;email&gt; &lt;app_password&gt;</code>\n\n"
+        f"📋 <b>Available Commands:</b>\n"
+        f"• /report &lt;username&gt; – Start a new report\n"
+        f"• /donatesender &lt;email&gt; &lt;app_password&gt; – Add Gmail for +3 reports\n"
+        f"• /menu – Show main menu\n"
+        f"• /batal – Cancel current process\n"
+        f"• /help – View help\n"
+        f"• /status – Check bot status\n"
+        f"• /premium – Check premium status\n"
+        f"• /credit – Check remaining reports"
     )
     await update.message.reply_html(start_message, reply_markup=get_main_menu())
 
@@ -235,38 +247,28 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text("<b>🏠 Main Menu</b>", parse_mode="HTML", reply_markup=get_main_menu())
+        await update.callback_query.edit_message_text(f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🏠</tg-emoji> <b>Main Menu</b>", parse_mode=ParseMode.HTML, reply_markup=get_main_menu())
     else:
-        await update.message.reply_html("<b>🏠 Main Menu</b>", reply_markup=get_main_menu())
+        await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🏠</tg-emoji> <b>Main Menu</b>", reply_markup=get_main_menu())
 
 async def batal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in user_session or user_id in user_state:
         user_session.pop(user_id, None)
         user_state.pop(user_id, None)
-        await update.message.reply_text("❌ Process cancelled.")
+        await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_CHECK}'>❌</tg-emoji> Process cancelled.")
     else:
-        await update.message.reply_text("⚠️ No active process running.")
+        await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_WARN}'>⚠️</tg-emoji> No active process running.")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "<b>📖 Bot Assistance</b>\n\n"
-        "<b>📌 Features Available:</b>\n\n"
-        "<b>📝 Report Scam</b>\n"
-        "Report Telegram scam accounts directly to security channels.\n\n"
-        "<b>🏷️ Scam Tag (Premium)</b>\n"
-        "Generate an official scam warning tag for channels (Premium / Credit required).\n\n"
-        "<b>📧 Manage Emails</b> (Owner)\n"
-        "Add or remove destination target emails.\n\n"
-        "<b>👑 Owner Panel</b> (Owner)\n"
-        "• Manage Owners\n"
-        "• Manage Premium Users\n"
-        "• Add Credits\n\n"
-        "<b>🪙 Credits</b>\n"
-        "Check your available credit balance.\n\n"
-        "<b>📊 Status</b>\n"
-        "Check overall bot system metrics.\n\n"
-        "⚠️ For inquiries, contact @GrenTzy."
+        f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📖</tg-emoji> <b>Bot Assistance</b>\n\n"
+        f"<b>📝 Report Scam</b>\n"
+        f"Report Telegram scam accounts directly to security channels.\n\n"
+        f"<b>🏷️ Scam Tag (Premium)</b>\n"
+        f"Generate official scam warning tag.\n\n"
+        f"<b>📧 Donate Sender</b>\n"
+        f"Add your Gmail using <code>/donatesender email pass</code> to receive +3 free reports instantly."
     )
     if update.callback_query:
         await update.callback_query.answer()
@@ -280,19 +282,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     credits_val = get_credits(user_id)
     
     msg = (
-        f"<b>🟢 Bot Status</b>\n"
+        f"<tg-emoji emoji-id='{EMOJI_CHECK}'>🟢</tg-emoji> <b>Bot Status</b>\n"
         f"✅ Online\n"
         f"📧 Sender Email: {EMAIL_USER}\n"
         f"📤 Target List: {len(emails)} emails\n"
         f"📊 Active Sessions: {len(user_session)}\n"
         f"👑 Premium Status: {'✅ Active' if is_prem else '❌ Inactive'}\n"
-        f"🪙 Credits: {credits_val}"
+        f"🪙 Reports Left: {credits_val}"
     )
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Refresh", callback_data="status")]])
     
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
+        await update.callback_query.edit_message_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb)
     else:
         await update.message.reply_html(msg, reply_markup=kb)
 
@@ -301,7 +303,7 @@ async def premium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_prem = is_premium(user_id)
     credits_val = get_credits(user_id)
 
-    msg = f"<b>👑 Premium Active!</b> Feature unlocked: Scam Tag Generator. Credits: {credits_val}" if is_prem else f"<b>❌ Not Premium.</b> Credits: {credits_val}. Contact owner to acquire premium status or credits."
+    msg = f"<tg-emoji emoji-id='{EMOJI_FIRE}'>👑</tg-emoji> <b>Premium Active!</b> All features unlocked. Reports Left: {credits_val}" if is_prem else f"<tg-emoji emoji-id='{EMOJI_WARN}'>❌</tg-emoji> <b>Not Premium.</b> Reports Left: {credits_val}. Donate Gmail or contact admin for access."
     
     kb_list = [[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]
     if not is_prem:
@@ -317,14 +319,47 @@ async def premium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def credit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    msg = f"🪙 Your Credits: {get_credits(user_id)}"
+    msg = f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🪙</tg-emoji> <b>Your Reports Left:</b> {get_credits(user_id)}"
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu")]])
     
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text(msg)
+        await update.callback_query.message.reply_html(msg, reply_markup=kb)
     else:
-        await update.message.reply_text(msg, reply_markup=kb)
+        await update.message.reply_html(msg, reply_markup=kb)
+
+async def donate_sender(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    u_data = get_user_data(user.id)
+
+    if len(context.args) < 2:
+        format_text = (
+            f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📌</tg-emoji> <b>Format Donasi</b>\n\n"
+            f"<b>Format:</b> <code>/donatesender email@gmail.com password_app</code>\n\n"
+            f"Donasikan akun Gmail Anda untuk mendapatkan <b>+3 report gratis</b>."
+        )
+        return await update.message.reply_html(format_text)
+
+    email = context.args[0]
+    app_password = " ".join(context.args[1:])
+
+    email_regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+    if not re.match(email_regex, email):
+        return await update.message.reply_html(
+            f"<tg-emoji emoji-id='{EMOJI_WARN}'>⚠️</tg-emoji> Kripya ek valid Gmail address dein."
+        )
+
+    u_data["donated_emails"].append({"email": email, "password": app_password})
+    u_data["reports_left"] += 3
+    save_json(USERS_FILE, users_db)
+
+    success_text = (
+        f"<tg-emoji emoji-id='{EMOJI_CHECK}'>✅</tg-emoji> <b>Donasi Berhasil</b>\n\n"
+        f"Terima kasih! Akun <b>{email}</b> berhasil ditambahkan.\n\n"
+        f"Anda mendapatkan <b>+3 laporan gratis</b>.\n"
+        f"<b>Sisa laporan gratis Anda sekarang:</b> {u_data['reports_left']}"
+    )
+    await update.message.reply_html(success_text)
 
 # ============================================================
 #  REPORT PROCESS HANDLERS
@@ -332,8 +367,22 @@ async def credit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def report_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = update.effective_user
-    username_or_name = f"@{user.username}" if user.username else user.first_name
+    u_data = get_user_data(user.id)
 
+    # Limit check
+    if not is_owner(user_id) and u_data["reports_left"] <= 0:
+        denied_text = (
+            f"<tg-emoji emoji-id='{EMOJI_WARN}'>❌</tg-emoji> <b>Akses Ditolak / Limit Exhausted</b>\n\n"
+            f"Kamu punya <b>0 report gratis</b>.\n"
+            f"Donasikan akun Gmail untuk dapat <b>+3 report</b>.\n\n"
+            f"<b>Ketik:</b> <code>/donatesender email@gmail.com app_password</code>"
+        )
+        if update.callback_query:
+            await update.callback_query.answer()
+            return await update.callback_query.message.reply_html(denied_text)
+        return await update.message.reply_html(denied_text)
+
+    username_or_name = f"@{user.username}" if user.username else user.first_name
     user_session.pop(user_id, None)
 
     args = context.args if context.args else []
@@ -344,13 +393,13 @@ async def report_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "step": "type",
             "data": {"reporter": username_or_name, "username": username_arg}
         }
-        msg = "☠️ Select scam target type:\n<code>bot</code>, <code>channel</code>, <code>group</code>, <code>user</code>, <code>phishing</code>"
+        msg = f"<tg-emoji emoji-id='{EMOJI_WARN}'>☠️</tg-emoji> Select scam target type:\n<code>bot</code>, <code>channel</code>, <code>group</code>, <code>user</code>, <code>phishing</code>"
     else:
         user_session[user_id] = {
             "step": "username",
             "data": {"reporter": username_or_name}
         }
-        msg = "📱 Enter <b>username</b> or ID of the scam target (e.g. @scammer_bot):"
+        msg = f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📱</tg-emoji> Enter <b>username</b> or ID of the scam target (e.g. @scammer_bot):"
 
     if update.callback_query:
         await update.callback_query.answer()
@@ -369,18 +418,16 @@ async def scam_tag_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not use_credit(user_id):
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Menu", callback_data="menu")]])
             return await query.message.reply_html(
-                "<b>⛔ Premium Feature.</b>\nUse /premium to check status, or contact admin to acquire access.",
+                f"<tg-emoji emoji-id='{EMOJI_WARN}'>⛔</tg-emoji> <b>Premium Feature.</b>\nUse /premium or add Gmail via /donatesender to earn reports.",
                 reply_markup=kb
             )
-        else:
-            save_json(CREDITS_FILE, user_credits)
 
     user_session.pop(user_id, None)
     user_session[user_id] = {
         "step": "scam_tag_username",
         "data": {"reporter": username_or_name}
     }
-    await query.message.reply_html("🏷️ Enter target <b>channel username</b> (e.g. @channelname):")
+    await query.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🏷️</tg-emoji> Enter target <b>channel username</b> (e.g. @channelname):")
 
 # ============================================================
 #  OWNER & EMAIL MANAGEMENT HANDLERS
@@ -391,7 +438,7 @@ async def manage_emails(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer("⛔ Owner restricted area.", show_alert=True)
     await query.answer()
     await query.message.delete()
-    await query.message.reply_html("<b>📧 Target Email Management</b>", reply_markup=get_email_manage_keyboard())
+    await query.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📧</tg-emoji> <b>Target Email Management</b>", reply_markup=get_email_manage_keyboard())
 
 async def owner_action_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -407,7 +454,7 @@ async def owner_action_trigger(update: Update, context: ContextTypes.DEFAULT_TYP
         "delowner": "📌 Send User ID to demote from Owner.\nExample: <code>123456789</code>",
         "addprem": "📌 Send User ID to grant Premium access.\nExample: <code>123456789</code>",
         "delprem": "📌 Send User ID to revoke Premium access.\nExample: <code>123456789</code>",
-        "addcredit": "📌 Send User ID and credit amount.\nFormat: <code>&lt;user_id&gt; &lt;amount&gt;</code>\nExample: <code>123456789 10</code>",
+        "addcredit": "📌 Send User ID and report amount.\nFormat: <code>&lt;user_id&gt; &lt;amount&gt;</code>\nExample: <code>123456789 10</code>",
         "add_email": "📧 Send email address to add (e.g. target@domain.com)",
         "remove_email": "📧 Send email address to remove"
     }
@@ -428,7 +475,7 @@ async def list_emails_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     load_all_data()
     email_list = "\n".join([f"{i+1}. {e}" for i, e in enumerate(emails)]) if emails else "Empty"
-    msg = f"<b>📧 Target Email List ({len(emails)})</b>\n{email_list}"
+    msg = f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📧</tg-emoji> <b>Target Email List ({len(emails)})</b>\n{email_list}"
 
     if update.callback_query:
         await update.callback_query.answer()
@@ -472,10 +519,15 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "confirm_no":
         user_session.pop(user_id, None)
         await query.message.delete()
-        return await query.message.reply_text("❌ Action cancelled.", reply_markup=get_after_report_keyboard())
+        return await query.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_WARN}'>❌</tg-emoji> Action cancelled.", reply_markup=get_after_report_keyboard())
 
     if not session or session.get("step") != "confirm":
-        return await query.message.reply_text("⚠️ Invalid session. Please start again with /report")
+        return await query.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_WARN}'>⚠️</tg-emoji> Invalid session. Please start again with /report")
+
+    # Deduct 1 credit upon sending execution
+    if not use_credit(user_id):
+        user_session.pop(user_id, None)
+        return await query.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_WARN}'>❌</tg-emoji> Insufficient reports remaining.")
 
     status_msg = await query.message.reply_text("⏳ Processing email transmission...")
 
@@ -489,16 +541,16 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success = len([r for r in results if r["status"] == "OK"])
     failed = total - success
 
-    msg = f"<b>📤 Execution Summary</b>\n✅ {success} Successful\n❌ {failed} Failed\n📊 Total Transmissions: {total}\n\n"
+    msg = f"<tg-emoji emoji-id='{EMOJI_CHECK}'>📤</tg-emoji> <b>Execution Summary</b>\n✅ {success} Successful\n❌ {failed} Failed\n📊 Total Transmissions: {total}\n\n"
     if failed > 0:
         msg += "<b>Error Preview:</b>\n"
         errors = [r for r in results if r["status"] == "FAIL"][:3]
         for e in errors:
             msg += f"- {e['dest']}: {e['error'][:50]}...\n"
 
-    msg += f"\nScam report for <b>{data.get('username')}</b> has been processed."
+    u_data = get_user_data(user_id)
+    msg += f"\nScam report for <b>{data.get('username')}</b> has been processed.\n<b>Sisa laporan gratis Anda:</b> {u_data['reports_left']}"
     await status_msg.edit_text(msg, parse_mode="HTML", reply_markup=get_after_report_keyboard())
-    print(f"[LOG] {data.get('reporter')} -> {data.get('username')} ({success}/{total}) loop={loop} delay={delay}")
     user_session.pop(user_id, None)
 
 # ============================================================
@@ -514,50 +566,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if action in ["addowner", "delowner", "addprem", "delprem"]:
             if not text.isdigit():
-                return await update.message.reply_text("❌ Invalid User ID. Please provide numeric format.")
+                return await update.message.reply_html("❌ Invalid User ID. Please provide numeric format.")
             target_id = int(text)
 
             if action == "addowner":
                 if target_id in owners:
-                    return await update.message.reply_text("⚠️ User ID is already an Owner.")
+                    return await update.message.reply_html("⚠️ User ID is already an Owner.")
                 owners.append(target_id)
                 save_all_data()
-                return await update.message.reply_text(f"✅ User ID {target_id} is now an Owner.")
+                return await update.message.reply_html(f"✅ User ID {target_id} is now an Owner.")
 
             elif action == "delowner":
                 if target_id == ADMIN_ID:
-                    return await update.message.reply_text("❌ Cannot remove primary bot owner.")
+                    return await update.message.reply_html("❌ Cannot remove primary bot owner.")
                 if target_id not in owners:
-                    return await update.message.reply_text("❌ User ID is not an Owner.")
+                    return await update.message.reply_html("❌ User ID is not an Owner.")
                 owners.remove(target_id)
                 save_all_data()
-                return await update.message.reply_text(f"✅ User ID {target_id} demoted from Owner.")
+                return await update.message.reply_html(f"✅ User ID {target_id} demoted from Owner.")
 
             elif action == "addprem":
                 if target_id in premium_users:
-                    return await update.message.reply_text("⚠️ User ID is already Premium.")
+                    return await update.message.reply_html("⚠️ User ID is already Premium.")
                 premium_users.add(target_id)
                 save_all_data()
-                return await update.message.reply_text(f"✅ User ID {target_id} granted Premium status.")
+                return await update.message.reply_html(f"✅ User ID {target_id} granted Premium status.")
 
             elif action == "delprem":
                 if target_id not in premium_users:
-                    return await update.message.reply_text("❌ User ID is not Premium.")
+                    return await update.message.reply_html("❌ User ID is not Premium.")
                 premium_users.remove(target_id)
                 save_all_data()
-                return await update.message.reply_text(f"✅ User ID {target_id} removed from Premium.")
+                return await update.message.reply_html(f"✅ User ID {target_id} removed from Premium.")
 
         elif action == "addcredit":
             parts = text.split()
             if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
-                return await update.message.reply_text("❌ Format: <user_id> <amount>")
+                return await update.message.reply_html("❌ Format: <user_id> <amount>")
             target_id = int(parts[0])
             amount = int(parts[1])
             if amount <= 0:
-                return await update.message.reply_text("❌ Amount must be greater than 0.")
+                return await update.message.reply_html("❌ Amount must be greater than 0.")
             add_credits(target_id, amount)
-            save_all_data()
-            return await update.message.reply_text(f"✅ Added {amount} credits to ID {target_id}. Current total: {get_credits(target_id)}")
+            return await update.message.reply_html(f"✅ Added {amount} reports to ID {target_id}. Current total: {get_credits(target_id)}")
 
     session = user_session.get(user_id)
     if not session:
@@ -567,57 +618,57 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == "add_email":
         if not is_owner(user_id):
-            return await update.message.reply_text("⛔ Owner restricted area.")
+            return await update.message.reply_html("⛔ Owner restricted area.")
         if "@" not in text:
-            return await update.message.reply_text("❌ Invalid email format.")
+            return await update.message.reply_html("❌ Invalid email format.")
         if text in emails:
-            return await update.message.reply_text("⚠️ Email already exists in list.")
+            return await update.message.reply_html("⚠️ Email already exists in list.")
         emails.append(text)
         save_all_data()
         user_session.pop(user_id, None)
-        return await update.message.reply_text(f"✅ Email {text} successfully added.")
+        return await update.message.reply_html(f"✅ Email {text} successfully added.")
 
     if step == "remove_email":
         if not is_owner(user_id):
-            return await update.message.reply_text("⛔ Owner restricted area.")
+            return await update.message.reply_html("⛔ Owner restricted area.")
         if text not in emails:
-            return await update.message.reply_text("❌ Email not found in list.")
+            return await update.message.reply_html("❌ Email not found in list.")
         emails.remove(text)
         save_all_data()
         user_session.pop(user_id, None)
-        return await update.message.reply_text(f"✅ Email {text} removed.")
+        return await update.message.reply_html(f"✅ Email {text} removed.")
 
     if step == "scam_tag_username":
         tag = (
-            f"<b>🏷️ SCAM CHANNEL TAG — GRENXHARIMAU EDITION</b>\n"
+            f"<tg-emoji emoji-id='{EMOJI_FIRE}'>🏷️</tg-emoji> <b>SCAM CHANNEL TAG — EDITION</b>\n"
             f"Channel  : {text}\n"
             f"Reporter : {session['data']['reporter']}\n"
             f"Date     : {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
             f"⚠️ WARNING: This channel has been identified as a scam!\n"
-            f"Report immediately! #GrenXHarimau #AntiScam"
+            f"Report immediately! #AntiScam"
         )
         await update.message.reply_html(tag)
-        await update.message.reply_text("✅ Scam tag generated successfully!", reply_markup=get_after_report_keyboard())
+        await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_CHECK}'>✅</tg-emoji> Scam tag generated successfully!", reply_markup=get_after_report_keyboard())
         user_session.pop(user_id, None)
         return
 
     if step == "username":
         session["data"]["username"] = text
         session["step"] = "type"
-        return await update.message.reply_html("☠️ Select target type:\n<code>bot</code>, <code>channel</code>, <code>group</code>, <code>user</code>, <code>phishing</code>")
+        return await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_WARN}'>☠️</tg-emoji> Select target type:\n<code>bot</code>, <code>channel</code>, <code>group</code>, <code>user</code>, <code>phishing</code>")
 
     if step == "type":
         valid_types = ["bot", "channel", "group", "user", "phishing"]
         if text.lower() not in valid_types:
-            return await update.message.reply_text("❌ Invalid target type. Choose from: bot, channel, group, user, phishing")
+            return await update.message.reply_html("❌ Invalid target type. Choose from: bot, channel, group, user, phishing")
         session["data"]["type"] = text.lower()
         session["step"] = "subject"
-        return await update.message.reply_html("📌 Enter <b>Custom Subject</b> for email:")
+        return await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📌</tg-emoji> Enter <b>Custom Subject</b> for email:")
 
     if step == "subject":
         session["data"]["subject"] = text
         session["step"] = "description"
-        return await update.message.reply_text("📝 Provide detailed description of the scam:")
+        return await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📝</tg-emoji> Provide detailed description of the scam:")
 
     if step == "description":
         session["data"]["description"] = text
@@ -627,18 +678,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb_list.append([InlineKeyboardButton("📧 Send to All Emails", callback_data="select_email_all")])
         kb_list.append([InlineKeyboardButton("🔙 Cancel", callback_data="confirm_no")])
 
-        return await update.message.reply_html("<b>📧 Select destination target email:</b>", reply_markup=InlineKeyboardMarkup(kb_list))
+        return await update.message.reply_html(f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📧</tg-emoji> <b>Select destination target email:</b>", reply_markup=InlineKeyboardMarkup(kb_list))
 
     if step == "loop":
         if not text.isdigit() or int(text) < 1:
-            return await update.message.reply_text("❌ Please enter a positive number.")
+            return await update.message.reply_html("❌ Please enter a positive number.")
         session["loop"] = int(text)
         session["step"] = "delay"
-        return await update.message.reply_text("⏱️ Delay between sending (in seconds):")
+        return await update.message.reply_html("⏱️ Delay between sending (in seconds):")
 
     if step == "delay":
         if not text.isdigit() or int(text) < 0:
-            return await update.message.reply_text("❌ Please enter a valid non-negative number.")
+            return await update.message.reply_html("❌ Please enter a valid non-negative number.")
         session["delay"] = int(text)
         session["step"] = "confirm"
 
@@ -648,7 +699,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         desc_short = desc[:100] + ("..." if len(desc) > 100 else "")
 
         summary = (
-            f"<b>📋 Report Summary</b>\n"
+            f"<tg-emoji emoji-id='{EMOJI_MAIL}'>📋</tg-emoji> <b>Report Summary</b>\n"
             f"Username   : {data['username']}\n"
             f"Type       : {data['type']}\n"
             f"Subject    : {data['subject']}\n"
@@ -676,6 +727,7 @@ def main():
     app.add_handler(CommandHandler("premium", premium_cmd))
     app.add_handler(CommandHandler("credit", credit_cmd))
     app.add_handler(CommandHandler("report", report_start))
+    app.add_handler(CommandHandler("donatesender", donate_sender))
     app.add_handler(CommandHandler("listemails", list_emails_handler))
 
     # Callbacks
