@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 import smtplib
-import socket
 from email.mime.text import MIMEText
 from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -18,10 +17,11 @@ from telegram.ext import (
 # ============================================================
 #  CONFIGURATION & DATA PATHS
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8558626927:AAFV3wIH0flAirKep8N10Em8T0TBC6pNCpY")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8842693606:AAFpPY5MYieZD27K-PhpYKh86FjU3Gjl4lc")
 EMAIL_USER = os.getenv("EMAIL_USER", "alphacopyright11@gmail.com")
+# Passwords me spaces na rakhein (e.g., xqmwtomayodnmzrj)
 EMAIL_PASS = os.getenv("EMAIL_PASS", "xqmwtomayodnmzrj")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "1908783570"))  # Replace with your Telegram ID
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1908783570"))
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 EMAILS_FILE = os.path.join(DATA_DIR, "emails.json")
@@ -74,7 +74,6 @@ def load_all_data():
     ]
     emails = load_json(EMAILS_FILE, default_emails)
     
-    # Auto-load owners & force ensure current ADMIN_ID is included
     loaded_owners = load_json(OWNERS_FILE, [ADMIN_ID])
     if ADMIN_ID not in loaded_owners:
         loaded_owners.append(ADMIN_ID)
@@ -91,7 +90,7 @@ def save_all_data():
     save_json(CREDITS_FILE, user_credits)
 
 # ============================================================
-#  HELPER FUNCTIONS (UNLIMITED OWNER CREDITS)
+#  HELPER FUNCTIONS
 # ============================================================
 def is_owner(user_id: int) -> bool:
     return int(user_id) in owners
@@ -119,7 +118,7 @@ def use_credit(user_id: int) -> bool:
     return False
 
 # ============================================================
-#  EMAIL LOGIC (FIXED NON-BLOCKING WITH TIMEOUT)
+#  EMAIL LOGIC (NON-BLOCKING WITH DYNAMIC SUBJECT)
 # ============================================================
 def generate_email_content(data: dict) -> str:
     return data.get('description', '')
@@ -130,7 +129,7 @@ def _send_mail_sync(dest, subject, content):
     msg["From"] = f"Scam Reporter <{EMAIL_USER}>"
     msg["To"] = dest
 
-    # Added 10 seconds strict timeout to prevent Render thread hanging
+    # 10s strict timeout for Render stability
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
         server.login(EMAIL_USER, EMAIL_PASS)
         server.sendmail(EMAIL_USER, [dest], msg.as_string())
@@ -140,12 +139,13 @@ async def send_email_reports(data: dict, loop: int = 1, delay: int = 0, target_e
     recipients = target_emails if target_emails else emails
     results = []
 
-    subject = f"[SCAM REPORT] {data.get('username', 'Unknown')}{' - CHANNEL' if data.get('type') == 'channel' else ''}"
+    # Use manual subject from user session, fallback to default if empty
+    default_sub = f"[SCAM REPORT] {data.get('username', 'Unknown')}{' - CHANNEL' if data.get('type') == 'channel' else ''}"
+    subject = data.get('subject', default_sub)
 
     for i in range(loop):
         for dest in recipients:
             try:
-                # Execution pushed completely to background executor
                 await asyncio.to_thread(_send_mail_sync, dest, subject, content)
                 results.append({"dest": dest, "loop": i + 1, "status": "OK"})
             except Exception as err:
@@ -255,7 +255,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>📝 Report Scam</b>\n"
         "Report Telegram scam accounts directly to security channels.\n\n"
         "<b>🏷️ Scam Tag (Premium)</b>\n"
-        "Generate a official scam warning tag for channels (Premium / Credit required).\n\n"
+        "Generate an official scam warning tag for channels (Premium / Credit required).\n\n"
         "<b>📧 Manage Emails</b> (Owner)\n"
         "Add or remove destination target emails.\n\n"
         "<b>👑 Owner Panel</b> (Owner)\n"
@@ -305,7 +305,7 @@ async def premium_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     kb_list = [[InlineKeyboardButton("🏠 Menu", callback_data="menu")]]
     if not is_prem:
-        kb_list.insert(0, [InlineKeyboardButton("📞 Contact Owner", url="https://t.me/NullQor")])
+        kb_list.insert(0, [InlineKeyboardButton("📞 Contact Owner", url="https://t.me/GrenTzy")])
 
     kb = InlineKeyboardMarkup(kb_list)
 
@@ -611,6 +611,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if text.lower() not in valid_types:
             return await update.message.reply_text("❌ Invalid target type. Choose from: bot, channel, group, user, phishing")
         session["data"]["type"] = text.lower()
+        session["step"] = "subject"
+        return await update.message.reply_html("📌 Enter <b>Custom Subject</b> for email:")
+
+    if step == "subject":
+        session["data"]["subject"] = text
         session["step"] = "description"
         return await update.message.reply_text("📝 Provide detailed description of the scam:")
 
@@ -646,6 +651,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"<b>📋 Report Summary</b>\n"
             f"Username   : {data['username']}\n"
             f"Type       : {data['type']}\n"
+            f"Subject    : {data['subject']}\n"
             f"Description: {desc_short}\n"
             f"Recipients : {selected}\n"
             f"Loop Count : {session['loop']}\n"
@@ -683,7 +689,6 @@ def main():
     app.add_handler(CallbackQueryHandler(manage_emails, pattern="^manage_emails$"))
     app.add_handler(CallbackQueryHandler(list_emails_handler, pattern="^list_emails$"))
     
-    # Dynamic Admin/Owner Trigger Callbacks
     app.add_handler(CallbackQueryHandler(owner_action_trigger, pattern="^(addowner|delowner|addprem|delprem|addcredit|add_email|remove_email)$"))
     app.add_handler(CallbackQueryHandler(handle_email_selection, pattern="^select_email_"))
     app.add_handler(CallbackQueryHandler(handle_confirm, pattern="^confirm_(yes|no)$"))
