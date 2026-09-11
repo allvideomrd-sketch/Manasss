@@ -17,7 +17,7 @@ from telegram.ext import (
 # ============================================================
 #  CONFIGURATION & DATA PATHS
 # ============================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8842693606:AAFpPY5MYieZD27K-PhpYKh86FjU3Gjl4lc")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8558626927:AAFV3wIH0flAirKep8N10Em8T0TBC6pNCpYc")
 EMAIL_USER = os.getenv("EMAIL_USER", "alphacopyright11@gmail.com")
 # Passwords me spaces na rakhein (e.g., xqmwtomayodnmzrj)
 EMAIL_PASS = os.getenv("EMAIL_PASS", "xqmwtomayodnmzrj")
